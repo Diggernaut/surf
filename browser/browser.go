@@ -24,7 +24,7 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-// Attribute represents a Browser capability.
+// Attribute represents a Browser capability
 type Attribute int
 
 // AttributeMap represents a map of Attribute values.
