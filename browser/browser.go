@@ -1061,6 +1061,10 @@ func isContentTypeHtml(res *http.Response) bool {
 
 // Manipulate contents with specific content-type
 func (bow *Browser) contentConversion(content_type string, url string) {
+	if bow.pluggable_converters["*"] != nil {
+		bow.body = bow.pluggable_converters["*"](bow.body, content_type, url)
+		return
+	}
 	re := regexp.MustCompile("^([A-z\\/\\.\\+\\-]+)")
 	matches := re.FindAllStringSubmatch(content_type, -1)
 	if len(matches) > 0 {
@@ -1091,7 +1095,7 @@ func (bow *Browser) contentFix(content_type string) bool {
 	if len(matches) > 0 {
 		match := matches[0][1]
 		for _, v := range bow.pluggableContentTypeChecker {
-			if v == match {
+			if v == match || match == "*" {
 				return true
 			}
 		}
