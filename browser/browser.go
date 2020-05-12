@@ -832,6 +832,9 @@ func (bow *Browser) httpRequest(req *http.Request) error {
 				bow.body = []byte(`<html></html>`)
 			}
 		}
+	} else {
+		resp = &http.Response{StatusCode: 503, Request: req}
+		bow.body = []byte(`<html></html>`)
 	}
 	return bow.httpRequestComplete(req, resp, nil)
 }
