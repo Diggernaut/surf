@@ -346,6 +346,11 @@ func (bow *Browser) PostForm(u string, data url.Values, ref *url.URL) error {
 	return bow.Post(u, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()), ref)
 }
 
+// PutForm requests the given URL using the POST method with the given data.
+func (bow *Browser) PutForm(u string, data url.Values, ref *url.URL) error {
+	return bow.Put(u, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()), ref)
+}
+
 // PostMultipart requests the given URL using the POST method with the given data using multipart/form-data format.
 func (bow *Browser) PostMultipart(u string, data url.Values, ref *url.URL) error {
 	body := &bytes.Buffer{}
