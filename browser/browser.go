@@ -332,6 +332,15 @@ func (bow *Browser) Post(u string, contentType string, body io.Reader, ref *url.
 	return bow.httpPOST(ur, ref, contentType, body)
 }
 
+// Put requests the given URL using the POST method.
+func (bow *Browser) Put(u string, contentType string, body io.Reader, ref *url.URL) error {
+	ur, err := url.Parse(u)
+	if err != nil {
+		return err
+	}
+	return bow.httpPUT(ur, ref, contentType, body)
+}
+
 // PostForm requests the given URL using the POST method with the given data.
 func (bow *Browser) PostForm(u string, data url.Values, ref *url.URL) error {
 	return bow.Post(u, "application/x-www-form-urlencoded", strings.NewReader(data.Encode()), ref)
@@ -753,6 +762,19 @@ func (bow *Browser) httpHEAD(u *url.URL, ref *url.URL) error {
 // be set to ref.
 func (bow *Browser) httpPOST(u *url.URL, ref *url.URL, contentType string, body io.Reader) error {
 	req, err := bow.buildRequest("POST", u.String(), ref, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", contentType)
+
+	return bow.httpRequest(req)
+}
+
+// httpPUT makes an HTTP PUT request for the given URL.
+// When via is not nil, and AttributeSendReferer is true, the Referer header will
+// be set to ref.
+func (bow *Browser) httpPUT(u *url.URL, ref *url.URL, contentType string, body io.Reader) error {
+	req, err := bow.buildRequest("PUT", u.String(), ref, body)
 	if err != nil {
 		return err
 	}
