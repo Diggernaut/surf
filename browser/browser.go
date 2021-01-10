@@ -1098,7 +1098,7 @@ func (bow *Browser) contentFix(content_type string) bool {
 	if len(matches) > 0 {
 		match := matches[0][1]
 		for _, v := range bow.pluggableContentTypeChecker {
-			if v == match || match == "*" {
+			if v == match || v == "*" {
 				return true
 			}
 		}
