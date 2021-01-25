@@ -891,6 +891,7 @@ func (bow *Browser) solveCF(resp *http.Response, rurl *url.URL) bool {
 	if err != nil {
 		return false
 	}
+
 	buff := bytes.NewBuffer(body)
 	dom, err := goquery.NewDocumentFromReader(buff)
 	if err != nil {
@@ -899,6 +900,9 @@ func (bow *Browser) solveCF(resp *http.Response, rurl *url.URL) bool {
 	host := rurl.Host
 
 	js := dom.Find("script:contains(\"s,t,o,p,b,r,e,a,k,i,n,g\")").Text()
+	if len(js) == 0 {
+		return false
+	}
 	if strings.Contains(js, "parseInt") {
 		re1 := regexp.MustCompile("setTimeout\\(function\\(\\){\\s+(var s,t,o,p,b,r,e,a,k,i,n,g,f.+?\\r?\\n[\\s\\S]+?a\\.value =.+?)\\r?\\n")
 		re2 := regexp.MustCompile("a\\.value = (parseInt\\(.+?\\)).+")
