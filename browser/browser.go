@@ -20,7 +20,7 @@ import (
 	"github.com/Diggernaut/mahonia"
 	"github.com/Diggernaut/surf/errors"
 	"github.com/Diggernaut/surf/jar"
-	"github.com/robertkrimen/otto"
+	"github.com/Diggernaut/otto"
 	"golang.org/x/net/html/charset"
 )
 
