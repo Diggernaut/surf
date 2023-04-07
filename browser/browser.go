@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 	"github.com/Diggernaut/mahonia"
 	"github.com/Diggernaut/surf/errors"
 	"github.com/Diggernaut/surf/jar"
-	"github.com/Diggernaut/otto"
 	"golang.org/x/net/html/charset"
 )
 
@@ -180,6 +178,12 @@ type Browsable interface {
 	// Dom returns the inner *goquery.Selection.
 	Dom() *goquery.Selection
 
+	// RequestSize returns the number of bytes for the request.
+	RequestSize() int
+
+	// ResponseSize returns the number of bytes for the response.
+	ResponseSize() int
+
 	// Find returns the dom selections matching the given expression.
 	Find(expr string) *goquery.Selection
 
@@ -242,6 +246,10 @@ type Browser struct {
 	// reload counter
 	reloadCounter int
 	maxReloads    int
+
+	// request/response size
+	requestSize  int
+	responseSize int
 }
 
 // Init pluggable map
@@ -721,6 +729,16 @@ func (bow *Browser) ClearTimeout() {
 	bow.timeout = 180
 }
 
+// RequestSize returns HTTP request size in bytes
+func (bow *Browser) RequestSize() int {
+	return bow.requestSize
+}
+
+// ResponseSize returns HTTP response size in bytes
+func (bow *Browser) ResponseSize() int {
+	return bow.responseSize
+}
+
 // -- Unexported methods --
 
 // buildClient creates, configures, and returns a *http.Client type.
@@ -817,6 +835,11 @@ func (bow *Browser) httpPATCH(u *url.URL, ref *url.URL, contentType string, body
 
 // send uses the given *http.Request to make an HTTP request.
 func (bow *Browser) httpRequest(req *http.Request) error {
+	bow.requestSize = 0
+	requestDump, err := httputil.DumpRequest(req, true)
+	if err == nil {
+		bow.requestSize = len(requestDump)
+	}
 	bow.preSend()
 	resp, err := bow.buildClient().Do(req)
 	if e, ok := err.(net.Error); ok && e.Timeout() {
@@ -838,11 +861,9 @@ func (bow *Browser) httpRequest(req *http.Request) error {
 			d, _ := httputil.DumpResponse(resp, false)
 			fmt.Fprintln(os.Stderr, "===== [DUMP] =====\n", string(d))
 		}
-		if resp.StatusCode == 503 && (resp.Header.Get("Server") == "cloudflare-nginx" || resp.Header.Get("Server") == "cloudflare") {
-			if !bow.solveCF(resp, req.URL) {
-				return bow.httpRequestComplete(req, resp, fmt.Errorf("Page protected with cloudflare with unknown algorythm"))
-			}
-			return nil
+		responseDump, err := httputil.DumpResponse(resp, true)
+		if err == nil {
+			bow.responseSize = len(responseDump)
 		}
 
 		contentType := resp.Header.Get("Content-Type")
@@ -904,139 +925,6 @@ func (bow *Browser) httpRequestComplete(req *http.Request, resp *http.Response, 
 	bow.postSend()
 	bow.reloadCounter = 0
 	return err
-}
-
-// Solve CloudFlare
-func (bow *Browser) solveCF(resp *http.Response, rurl *url.URL) bool {
-	if strings.Contains(rurl.String(), "chk_jschl") {
-		// We are in deadloop
-		return false
-	}
-
-	time.Sleep(time.Duration(4) * time.Second)
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return false
-	}
-
-	buff := bytes.NewBuffer(body)
-	dom, err := goquery.NewDocumentFromReader(buff)
-	if err != nil {
-		return false
-	}
-	host := rurl.Host
-
-	js := dom.Find("script:contains(\"s,t,o,p,b,r,e,a,k,i,n,g\")").Text()
-	if len(js) == 0 {
-		return false
-	}
-	if strings.Contains(js, "parseInt") {
-		re1 := regexp.MustCompile("setTimeout\\(function\\(\\){\\s+(var s,t,o,p,b,r,e,a,k,i,n,g,f.+?\\r?\\n[\\s\\S]+?a\\.value =.+?)\\r?\\n")
-		re2 := regexp.MustCompile("a\\.value = (parseInt\\(.+?\\)).+")
-		re3 := regexp.MustCompile("\\s{3,}[a-z](?: = |\\.).+")
-		re4 := regexp.MustCompile("[\\n\\\\']")
-
-		js = re1.FindAllStringSubmatch(js, -1)[0][1]
-		js = re2.ReplaceAllString(js, re2.FindAllStringSubmatch(js, -1)[0][1])
-		js = re3.ReplaceAllString(js, "")
-		js = re4.ReplaceAllString(js, "")
-		js = strings.Replace(js, "return", "", -1)
-
-		jsEngine := otto.New()
-		data, err := jsEngine.Eval(js)
-		if err != nil {
-			return false
-		}
-		checksum, err := data.ToInteger()
-		if err != nil {
-			return false
-		}
-		checksum += int64(len(host))
-		if err != nil {
-			return false
-		}
-
-		jschlVc, _ := dom.Find("input[name=\"jschl_vc\"]").Attr("value")
-		pass, _ := dom.Find("input[name=\"pass\"]").Attr("value")
-		jschlAnswer := strconv.Itoa(int(checksum))
-
-		u := rurl.Scheme + "://" + rurl.Host + "/cdn-cgi/l/chk_jschl"
-		ur, err := url.Parse(u)
-		q := ur.Query()
-		q.Add("jschl_vc", jschlVc)
-		q.Add("pass", pass)
-		q.Add("jschl_answer", jschlAnswer)
-		ur.RawQuery = q.Encode()
-
-		bow.DelRequestHeader("Cookie")
-		bow.DelRequestHeader("Referer")
-		bow.AddRequestHeader("Referer", rurl.String())
-
-		cjar := bow.GetCookieJar()
-		cook := cjar.Cookies(rurl)
-		if cook != nil {
-			for _, co := range cook {
-				bow.AddRequestHeader("Cookie", co.Name+"="+co.Value)
-			}
-		}
-		bow.Open(ur.String())
-
-		if bow.refresh != nil {
-			bow.refresh.Stop()
-		}
-		return true
-	}
-
-	re1 := regexp.MustCompile("setTimeout\\(function\\(\\){\\s+(var s,t,o,p,b,r,e,a,k,i,n,g,f.+?\\r?\\n[\\s\\S]+?a\\.value =.+?)\\r?\\n")
-	re2 := regexp.MustCompile("\\s{3,}[a-z](?: = |\\.).+")
-	re3 := regexp.MustCompile("[\\n\\\\']")
-	re4 := regexp.MustCompile(";\\s*\\d+\\s*$")
-	re5 := regexp.MustCompile("a\\.value\\s*\\=")
-
-	js = re1.FindAllStringSubmatch(js, -1)[0][1]
-	js = strings.Replace(js, "s,t,o,p,b,r,e,a,k,i,n,g,f,", "s,t = \""+host+"\",o,p,b,r,e,a,k,i,n,g,f,", 1)
-	js = re2.ReplaceAllString(js, "")
-	js = re3.ReplaceAllString(js, "")
-	js = re4.ReplaceAllString(js, "")
-	js = re5.ReplaceAllString(js, "return ")
-
-	jsEngine := otto.New()
-	data, err := jsEngine.Eval("(function () {" + js + "})()")
-	if err != nil {
-		return false
-	}
-	checksum, err := data.ToInteger()
-	if err != nil {
-		return false
-	}
-	checksum += int64(len(host))
-	if err != nil {
-		return false
-	}
-
-	jschlVc, _ := dom.Find("input[name=\"jschl_vc\"]").Attr("value")
-	pass, _ := dom.Find("input[name=\"pass\"]").Attr("value")
-
-	u := rurl.Scheme + "://" + rurl.Host + "/cdn-cgi/l/chk_jschl"
-	ur, err := url.Parse(u)
-	q := ur.Query()
-	q.Add("jschl_vc", jschlVc)
-	q.Add("pass", pass)
-	ur.RawQuery = q.Encode() + "&jschl_answer=" + data.String()
-
-	bow.DelRequestHeader("Cookie")
-	bow.DelRequestHeader("Referer")
-	bow.AddRequestHeader("Referer", rurl.String())
-	bow.AddRequestHeader("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8")
-	bow.AddRequestHeader("accept-language", "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7")
-	bow.AddRequestHeader("upgrade-insecure-requests", "1")
-
-	bow.Open(ur.String())
-
-	if bow.refresh != nil {
-		bow.refresh.Stop()
-	}
-	return true
 }
 
 // preSend sets browser state before sending a request.
