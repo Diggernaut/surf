@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/Diggernaut/goquery"
+	"github.com/diggernaut/goquery"
 )
 
 // State represents a point in time.

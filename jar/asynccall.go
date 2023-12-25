@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Diggernaut/goquery"
+	"github.com/diggernaut/goquery"
 )
 
 type AsyncDom struct {
