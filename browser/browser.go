@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Diggernaut/goquery"
-	"github.com/Diggernaut/mahonia"
-	"github.com/Diggernaut/surf/errors"
-	"github.com/Diggernaut/surf/jar"
+	"github.com/diggernaut/goquery"
+	"github.com/diggernaut/mahonia"
+	"github.com/diggernaut/surf/errors"
+	"github.com/diggernaut/surf/jar"
 	"golang.org/x/net/html/charset"
 )
 
