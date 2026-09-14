@@ -3,6 +3,11 @@
   HTTP client (Chrome/Firefox TLS fingerprints, HTTP/2/3, connection pooling)
   using its Std() adapter. Headers, User-Agent, cookies, redirects, converters
   and the DOM pipeline are unchanged.
+* Added selectable HTTP mechanics: `NewBrowser()` serves requests with the
+  classic net/http transport (pre-enetx behaviour, safe default), while
+  `NewEnetxBrowser()` and `Browser.SetEngine(EngineEnetx)` switch to the
+  enetx/surf client. `SetEngine`/`GetEngine` work at any time; the cookie jar,
+  headers and history are shared, so the browsing state survives a switch.
 * Added browser impersonation settings: `SetImpersonation(Impersonation{Browser, OS, Headers, UserAgent})`
   and `GetImpersonation()`. Supported browsers: chrome, firefox. Supported OS:
   windows, macos, linux, android, ios, random (android/ios select the mobile

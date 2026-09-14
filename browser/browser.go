@@ -35,6 +35,20 @@ type Attribute int
 // AttributeMap represents a map of Attribute values.
 type AttributeMap map[Attribute]bool
 
+// Engine represents the HTTP mechanics the browser serves requests with.
+type Engine int
+
+const (
+	// EngineClassic serves requests with a plain net/http transport, exactly
+	// like the browser did before the enetx/surf integration. Impersonation
+	// settings are stored but have no effect in this engine.
+	EngineClassic Engine = iota
+
+	// EngineEnetx serves requests through the enetx/surf client with browser
+	// TLS fingerprinting, HTTP/2 and HTTP/3 support.
+	EngineEnetx
+)
+
 const (
 	// SendRefererAttribute instructs a Browser to send the Referer header.
 	SendReferer Attribute = iota
@@ -124,8 +138,16 @@ type Browsable interface {
 	// SetTLSConfig sets a custom TLS configuration for requests.
 	SetTLSConfig(config *tls.Config)
 
+	// SetEngine switches the HTTP mechanics used for requests
+	// (EngineClassic or EngineEnetx).
+	SetEngine(e Engine)
+
+	// GetEngine returns the HTTP mechanics used for requests.
+	GetEngine() Engine
+
 	// SetProfile switches the impersonated browser family ("chrome" or
-	// "firefox") of the underlying HTTP client.
+	// "firefox") of the underlying HTTP client. No effect in the classic
+	// engine.
 	SetProfile(profile string)
 
 	// SetImpersonation switches the browser impersonation settings of the
@@ -271,7 +293,14 @@ type Browser struct {
 	// history stores the visited pages.
 	history jar.History
 
-	// surfClient is the underlying enetx/surf HTTP client used for requests.
+	// engine selects the HTTP mechanics used for requests.
+	engine Engine
+
+	// transport is the net/http transport used in the classic engine.
+	transport *http.Transport
+
+	// surfClient is the underlying enetx/surf HTTP client used for requests
+	// in the enetx engine.
 	surfClient *esurf.Client
 
 	// stdClient is the *http.Client adapter around surfClient.
@@ -693,7 +722,14 @@ func (bow *Browser) SetProxy(proxyURL string) {
 		}
 	}
 	bow.proxyURL = proxyURL
-	bow.reconfigureHTTPClient()
+	if bow.engine == EngineEnetx {
+		bow.reconfigureHTTPClient()
+		return
+	}
+	if bow.transport != nil {
+		bow.transport.CloseIdleConnections()
+	}
+	bow.applyClassicTransport()
 }
 
 // ClearProxy disables proxying for requests.
@@ -704,7 +740,11 @@ func (bow *Browser) ClearProxy() {
 // SetTLSConfig sets a custom TLS configuration for requests.
 func (bow *Browser) SetTLSConfig(config *tls.Config) {
 	bow.tlsConfig = config
-	bow.reconfigureHTTPClient()
+	if bow.engine == EngineEnetx {
+		bow.reconfigureHTTPClient()
+		return
+	}
+	bow.applyClassicTransport()
 }
 
 // SetImpersonation switches the browser impersonation settings of the
@@ -724,7 +764,9 @@ func (bow *Browser) SetImpersonation(imp Impersonation) {
 			}
 		}
 	}
-	bow.reconfigureHTTPClient()
+	if bow.engine == EngineEnetx {
+		bow.reconfigureHTTPClient()
+	}
 }
 
 // GetImpersonation returns the active browser impersonation settings. When a
@@ -745,13 +787,67 @@ func (bow *Browser) SetProfile(profile string) {
 // DisableKeepAlives disables HTTP keep-alive connections.
 func (bow *Browser) DisableKeepAlives() {
 	bow.disableKeepalive = true
-	bow.reconfigureHTTPClient()
+	if bow.engine == EngineEnetx {
+		bow.reconfigureHTTPClient()
+		return
+	}
+	bow.applyClassicTransport()
 }
 
 // CloseIdleConnections closes idle connections of the underlying HTTP client.
 func (bow *Browser) CloseIdleConnections() {
+	if bow.engine == EngineEnetx {
+		if bow.surfClient != nil {
+			bow.surfClient.CloseIdleConnections()
+		}
+		return
+	}
+	if bow.transport != nil {
+		bow.transport.CloseIdleConnections()
+	}
+}
+
+// SetEngine switches the HTTP mechanics used for requests. The cookie jar,
+// headers and history are shared between engines, so switching keeps the
+// browsing state; only the underlying connections are re-established.
+func (bow *Browser) SetEngine(e Engine) {
+	if bow.engine == e {
+		return
+	}
+	bow.engine = e
+	if e == EngineEnetx {
+		bow.transport = nil
+		bow.reconfigureHTTPClient()
+		return
+	}
 	if bow.surfClient != nil {
 		bow.surfClient.CloseIdleConnections()
+	}
+	bow.surfClient, bow.stdClient = nil, nil
+	bow.applyClassicTransport()
+}
+
+// GetEngine returns the HTTP mechanics used for requests.
+func (bow *Browser) GetEngine() Engine {
+	return bow.engine
+}
+
+// applyClassicTransport (re)creates the classic net/http transport with the
+// proxy, TLS and keep-alive settings currently configured on the browser.
+func (bow *Browser) applyClassicTransport() {
+	if bow.transport == nil {
+		bow.transport = &http.Transport{}
+	}
+	bow.transport.DisableKeepAlives = bow.disableKeepalive
+	if bow.tlsConfig != nil {
+		bow.transport.TLSClientConfig = bow.tlsConfig
+	}
+	if bow.proxyURL != "" {
+		if u, err := url.Parse(bow.proxyURL); err == nil {
+			bow.transport.Proxy = http.ProxyURL(u)
+		}
+	} else {
+		bow.transport.Proxy = nil
 	}
 }
 
@@ -839,6 +935,9 @@ func (bow *Browser) reassertHeaders(req *esurf.Request) {
 // proxy leaves no stale dialer behind. Idle connections of the replaced
 // client are closed.
 func (bow *Browser) reconfigureHTTPClient() {
+	if bow.engine != EngineEnetx {
+		return
+	}
 	old := bow.surfClient
 	bow.surfClient = esurf.NewClient()
 	b := bow.surfClient.Builder()
@@ -1033,14 +1132,27 @@ func (bow *Browser) ResponseSize() int {
 // and TLS fingerprint are shared, while timeout, cookies and the redirect
 // policy stay under browser control.
 func (bow *Browser) buildClient() *http.Client {
-	client := *bow.stdClient
+	if bow.engine == EngineEnetx {
+		client := *bow.stdClient
+		client.Timeout = time.Duration(time.Duration(bow.timeout) * time.Second)
+		if bow.useCookie {
+			client.Jar = bow.cookies
+		}
+		client.CheckRedirect = bow.shouldRedirect
+
+		return &client
+	}
+	client := &http.Client{}
 	client.Timeout = time.Duration(time.Duration(bow.timeout) * time.Second)
 	if bow.useCookie {
 		client.Jar = bow.cookies
 	}
 	client.CheckRedirect = bow.shouldRedirect
+	if bow.transport != nil {
+		client.Transport = bow.transport
+	}
 
-	return &client
+	return client
 }
 
 // buildRequest creates and returns a *http.Request type.
