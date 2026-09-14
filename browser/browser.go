@@ -2,6 +2,7 @@ package browser
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -17,6 +18,9 @@ import (
 
 	"github.com/diggernaut/goquery"
 	"github.com/diggernaut/mahonia"
+	"github.com/enetx/g"
+	esurf "github.com/enetx/surf"
+	utls "github.com/refraction-networking/utls"
 	"github.com/diggernaut/surf/errors"
 	"github.com/diggernaut/surf/jar"
 	"golang.org/x/net/html/charset"
@@ -82,11 +86,23 @@ type Browsable interface {
 	// SetHeadersJar sets the headers the browser sends with each request.
 	SetHeadersJar(h http.Header)
 
-	// SetTransport sets the http library transport mechanism for each request.
-	SetTransport(t *http.Transport)
+	// SetProxy routes all requests through the proxy at the given URL.
+	SetProxy(proxyURL string)
 
-	// SetTransport sets the http library transport mechanism for each request.
-	GetTransport() *http.Transport
+	// ClearProxy disables proxying for requests.
+	ClearProxy()
+
+	// SetTLSConfig sets a custom TLS configuration for requests.
+	SetTLSConfig(config *tls.Config)
+
+	// SetProfile switches the TLS fingerprint profile ("chrome" or "firefox").
+	SetProfile(profile string)
+
+	// DisableKeepAlives disables HTTP keep-alive connections.
+	DisableKeepAlives()
+
+	// CloseIdleConnections closes idle connections of the underlying HTTP client.
+	CloseIdleConnections()
 
 	// AddRequestHeader adds a header the browser sends with each request.
 	AddRequestHeader(name, value string)
@@ -218,9 +234,23 @@ type Browser struct {
 	// history stores the visited pages.
 	history jar.History
 
-	// transport specifies the mechanism by which individual HTTP
-	// requests are made.
-	transport *http.Transport
+	// surfClient is the underlying enetx/surf HTTP client used for requests.
+	surfClient *esurf.Client
+
+	// stdClient is the *http.Client adapter around surfClient.
+	stdClient *http.Client
+
+	// profile is the active TLS fingerprint profile ("chrome", "firefox", "" = none).
+	profile string
+
+	// proxyURL is the proxy used for requests, or empty for a direct connection.
+	proxyURL string
+
+	// tlsConfig is an optional custom TLS configuration.
+	tlsConfig *tls.Config
+
+	// disableKeepalive disables HTTP keep-alive connections when set.
+	disableKeepalive bool
 
 	// headers are additional headers to send with each request.
 	headers http.Header
@@ -608,14 +638,76 @@ func (bow *Browser) SetHeadersJar(h http.Header) {
 	bow.headers = h
 }
 
-// SetTransport sets the http library transport mechanism for each request.
-func (bow *Browser) SetTransport(t *http.Transport) {
-	bow.transport = t
+// SetProxy routes all requests through the proxy at the given URL.
+// Idle connections of the previous configuration are closed.
+func (bow *Browser) SetProxy(proxyURL string) {
+	old := bow.surfClient
+	bow.proxyURL = proxyURL
+	bow.reconfigureHTTPClient()
+	if old != nil {
+		old.CloseIdleConnections()
+	}
 }
 
-// GetTransport gets the http library transport mechanism.
-func (bow *Browser) GetTransport() *http.Transport {
-	return bow.transport
+// ClearProxy disables proxying for requests.
+func (bow *Browser) ClearProxy() {
+	bow.SetProxy("")
+}
+
+// SetTLSConfig sets a custom TLS configuration for requests.
+func (bow *Browser) SetTLSConfig(config *tls.Config) {
+	bow.tlsConfig = config
+	bow.reconfigureHTTPClient()
+}
+
+// SetProfile switches the TLS fingerprint profile used by the underlying
+// enetx/surf client. Supported values are "chrome" and "firefox"; any other
+// value falls back to the standard Go TLS client hello.
+func (bow *Browser) SetProfile(profile string) {
+	bow.profile = strings.ToLower(profile)
+	bow.reconfigureHTTPClient()
+}
+
+// DisableKeepAlives disables HTTP keep-alive connections.
+func (bow *Browser) DisableKeepAlives() {
+	bow.disableKeepalive = true
+	bow.reconfigureHTTPClient()
+}
+
+// CloseIdleConnections closes idle connections of the underlying HTTP client.
+func (bow *Browser) CloseIdleConnections() {
+	if bow.surfClient != nil {
+		bow.surfClient.CloseIdleConnections()
+	}
+}
+
+// reconfigureHTTPClient (re)builds the underlying enetx/surf client with the
+// current profile, proxy, TLS and keep-alive settings, and refreshes the
+// *http.Client adapter used to send requests.
+func (bow *Browser) reconfigureHTTPClient() {
+	if bow.surfClient == nil {
+		bow.surfClient = esurf.NewClient()
+	}
+	b := bow.surfClient.Builder()
+	switch bow.profile {
+	case "chrome":
+		b.JA().ShuffleExtensions().SetHelloID(utls.HelloChrome_Auto)
+	case "firefox":
+		b.JA().SetHelloID(utls.HelloFirefox_Auto)
+	}
+	if bow.proxyURL != "" {
+		b.Proxy(g.String(bow.proxyURL))
+	}
+	if bow.tlsConfig != nil {
+		b.TLSConfig(bow.tlsConfig)
+	}
+	if bow.disableKeepalive {
+		b.DisableKeepAlive()
+	}
+	if res := b.Build(); res.IsErr() {
+		panic(fmt.Sprintf("surf: cannot configure HTTP client: %v", res.Err()))
+	}
+	bow.stdClient = bow.surfClient.Std()
 }
 
 // AddRequestHeader sets a header the browser sends with each request.
@@ -741,19 +833,19 @@ func (bow *Browser) ResponseSize() int {
 
 // -- Unexported methods --
 
-// buildClient creates, configures, and returns a *http.Client type.
+// buildClient returns a *http.Client for making the next request. It wraps a
+// shallow copy of the enetx/surf std adapter so the transport, connection pool
+// and TLS fingerprint are shared, while timeout, cookies and the redirect
+// policy stay under browser control.
 func (bow *Browser) buildClient() *http.Client {
-	client := &http.Client{}
+	client := *bow.stdClient
 	client.Timeout = time.Duration(time.Duration(bow.timeout) * time.Second)
 	if bow.useCookie {
 		client.Jar = bow.cookies
 	}
 	client.CheckRedirect = bow.shouldRedirect
-	if bow.transport != nil {
-		client.Transport = bow.transport
-	}
 
-	return client
+	return &client
 }
 
 // buildRequest creates and returns a *http.Request type.

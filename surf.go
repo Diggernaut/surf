@@ -2,8 +2,6 @@
 package surf
 
 import (
-	"net/http"
-
 	"github.com/diggernaut/surf/agent"
 	"github.com/diggernaut/surf/browser"
 	"github.com/diggernaut/surf/jar"
@@ -12,6 +10,10 @@ import (
 var (
 	// DefaultUserAgent is the global user agent value.
 	DefaultUserAgent = agent.Create()
+
+	// DefaultProfile is the default TLS fingerprint profile of the underlying
+	// enetx/surf HTTP client.
+	DefaultProfile = "chrome"
 
 	// DefaultSendReferer is the global value for the AttributeSendReferer attribute.
 	DefaultSendReferer = true
@@ -34,7 +36,7 @@ func NewBrowser() *browser.Browser {
 	bow.SetBookmarksJar(jar.NewMemoryBookmarks())
 	bow.SetHistoryJar(jar.NewMemoryHistory())
 	bow.SetHeadersJar(jar.NewMemoryHeaders())
-	bow.SetTransport(&http.Transport{})
+	bow.SetProfile(DefaultProfile)
 	bow.SetAttributes(browser.AttributeMap{
 		browser.SendReferer:         DefaultSendReferer,
 		browser.MetaRefreshHandling: DefaultMetaRefreshHandling,

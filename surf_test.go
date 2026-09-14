@@ -3,7 +3,7 @@ package surf
 import (
 	"bytes"
 	"fmt"
-	"github.com/headzoo/surf/jar"
+	"github.com/diggernaut/surf/jar"
 	"github.com/headzoo/ut"
 	"net/http"
 	"net/http/httptest"
@@ -140,7 +140,7 @@ func TestHeaders(t *testing.T) {
 }
 
 // TestHeadersSet
-// See: https://github.com/headzoo/surf/pull/19
+// See: https://github.com/diggernaut/surf/pull/19
 func TestHeadersBug19(t *testing.T) {
 	ut.Run(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

@@ -2,7 +2,7 @@ package browser
 
 import (
 	"fmt"
-	"github.com/headzoo/surf/jar"
+	"github.com/diggernaut/surf/jar"
 	"github.com/headzoo/ut"
 	"net/http"
 	"net/http/httptest"
