@@ -18,11 +18,14 @@ import (
 
 	"github.com/diggernaut/goquery"
 	"github.com/diggernaut/mahonia"
-	"github.com/enetx/g"
-	esurf "github.com/enetx/surf"
-	utls "github.com/refraction-networking/utls"
 	"github.com/diggernaut/surf/errors"
 	"github.com/diggernaut/surf/jar"
+	"github.com/enetx/g"
+	grand "github.com/enetx/g/rand"
+	esurf "github.com/enetx/surf"
+	"github.com/enetx/surf/profiles"
+	"github.com/enetx/surf/profiles/chrome"
+	"github.com/enetx/surf/profiles/firefox"
 	"golang.org/x/net/html/charset"
 )
 
@@ -47,6 +50,32 @@ const (
 // assets. Increasing this size may lead to a very small performance increase
 // when downloading assets from a page with a lot of assets.
 var InitialAssetsSliceSize = 20
+
+// Impersonation configures how the underlying HTTP client mimics a real
+// browser. The zero value disables fingerprinting and falls back to the
+// standard Go TLS client.
+type Impersonation struct {
+	// Browser to impersonate: "chrome" or "firefox". Empty disables
+	// fingerprinting.
+	Browser string
+
+	// OS to impersonate: "windows", "macos", "linux", "android", "ios" or
+	// "random" (resolved once, when SetImpersonation is called). Android and
+	// iOS select the mobile fingerprint variant. Empty defaults to a desktop
+	// OS.
+	OS string
+
+	// Headers enables the browser profile's default header set and header
+	// ordering (sec-ch-ua, Accept, Accept-Encoding with brotli/zstd etc), as
+	// well as its HTTP/2 and HTTP/3 settings. The browser's own User-Agent,
+	// Referer, cookies and custom headers always take precedence over the
+	// profile defaults.
+	Headers bool
+
+	// UserAgent replaces the browser's User-Agent with the modern one matching
+	// Browser and OS, so the claimed user agent matches the TLS fingerprint.
+	UserAgent bool
+}
 
 // Browsable represents an HTTP web browser.
 type Browsable interface {
@@ -95,8 +124,16 @@ type Browsable interface {
 	// SetTLSConfig sets a custom TLS configuration for requests.
 	SetTLSConfig(config *tls.Config)
 
-	// SetProfile switches the TLS fingerprint profile ("chrome" or "firefox").
+	// SetProfile switches the impersonated browser family ("chrome" or
+	// "firefox") of the underlying HTTP client.
 	SetProfile(profile string)
+
+	// SetImpersonation switches the browser impersonation settings of the
+	// underlying HTTP client.
+	SetImpersonation(imp Impersonation)
+
+	// GetImpersonation returns the active browser impersonation settings.
+	GetImpersonation() Impersonation
 
 	// DisableKeepAlives disables HTTP keep-alive connections.
 	DisableKeepAlives()
@@ -240,8 +277,12 @@ type Browser struct {
 	// stdClient is the *http.Client adapter around surfClient.
 	stdClient *http.Client
 
-	// profile is the active TLS fingerprint profile ("chrome", "firefox", "" = none).
-	profile string
+	// impersonation is the active browser impersonation setting.
+	impersonation Impersonation
+
+	// lastReferer is the Referer header value used by the request currently
+	// in flight, needed to re-assert it when profile headers are enabled.
+	lastReferer string
 
 	// proxyURL is the proxy used for requests, or empty for a direct connection.
 	proxyURL string
@@ -638,15 +679,21 @@ func (bow *Browser) SetHeadersJar(h http.Header) {
 	bow.headers = h
 }
 
-// SetProxy routes all requests through the proxy at the given URL.
-// Idle connections of the previous configuration are closed.
+// SetProxy routes all requests through the proxy at the given URL. An empty
+// URL disables proxying. URLs without a scheme are treated as HTTP proxies,
+// so "host:port" and "//host:port" both mean "http://host:port". Idle
+// connections of the replaced HTTP client are closed either way.
 func (bow *Browser) SetProxy(proxyURL string) {
-	old := bow.surfClient
+	if proxyURL != "" {
+		if !strings.Contains(proxyURL, "//") {
+			proxyURL = "//" + proxyURL
+		}
+		if !strings.Contains(proxyURL, "://") {
+			proxyURL = "http:" + proxyURL
+		}
+	}
 	bow.proxyURL = proxyURL
 	bow.reconfigureHTTPClient()
-	if old != nil {
-		old.CloseIdleConnections()
-	}
 }
 
 // ClearProxy disables proxying for requests.
@@ -660,12 +707,39 @@ func (bow *Browser) SetTLSConfig(config *tls.Config) {
 	bow.reconfigureHTTPClient()
 }
 
-// SetProfile switches the TLS fingerprint profile used by the underlying
-// enetx/surf client. Supported values are "chrome" and "firefox"; any other
-// value falls back to the standard Go TLS client hello.
-func (bow *Browser) SetProfile(profile string) {
-	bow.profile = strings.ToLower(profile)
+// SetImpersonation switches the browser impersonation settings of the
+// underlying enetx/surf client. See the Impersonation type for the available
+// options.
+func (bow *Browser) SetImpersonation(imp Impersonation) {
+	imp.Browser = strings.ToLower(strings.TrimSpace(imp.Browser))
+	imp.OS = strings.ToLower(strings.TrimSpace(imp.OS))
+	if imp.OS == "random" {
+		imp.OS = grand.Choice(g.SliceOf("windows", "macos", "linux", "android", "ios")).Some()
+	}
+	bow.impersonation = imp
+	if imp.UserAgent {
+		if _, osKey, ok := bow.resolveImpersonation(); ok {
+			if ua := profileUserAgent(imp.Browser, osKey); ua != "" {
+				bow.userAgent = ua
+			}
+		}
+	}
 	bow.reconfigureHTTPClient()
+}
+
+// GetImpersonation returns the active browser impersonation settings. When a
+// random OS was requested, the resolved concrete OS is returned.
+func (bow *Browser) GetImpersonation() Impersonation {
+	return bow.impersonation
+}
+
+// SetProfile switches the impersonated browser family while keeping the other
+// impersonation options intact. Supported values are "chrome" and "firefox";
+// any other value falls back to the standard Go TLS client hello.
+func (bow *Browser) SetProfile(profile string) {
+	imp := bow.impersonation
+	imp.Browser = strings.ToLower(strings.TrimSpace(profile))
+	bow.SetImpersonation(imp)
 }
 
 // DisableKeepAlives disables HTTP keep-alive connections.
@@ -681,25 +755,143 @@ func (bow *Browser) CloseIdleConnections() {
 	}
 }
 
-// reconfigureHTTPClient (re)builds the underlying enetx/surf client with the
-// current profile, proxy, TLS and keep-alive settings, and refreshes the
-// *http.Client adapter used to send requests.
-func (bow *Browser) reconfigureHTTPClient() {
-	if bow.surfClient == nil {
-		bow.surfClient = esurf.NewClient()
+// resolveImpersonation maps the impersonation settings to an enetx/surf
+// profile variant and OS key. ok is false when fingerprinting is disabled.
+func (bow *Browser) resolveImpersonation() (variant profiles.Variant, osKey profiles.OSKey, ok bool) {
+	osKey = profiles.Windows
+	switch bow.impersonation.OS {
+	case "macos", "mac":
+		osKey = profiles.MacOS
+	case "linux":
+		osKey = profiles.Linux
+	case "android":
+		osKey = profiles.Android
+	case "ios":
+		osKey = profiles.IOS
 	}
-	b := bow.surfClient.Builder()
-	switch bow.profile {
+	switch bow.impersonation.Browser {
 	case "chrome":
-		b.JA().ShuffleExtensions().SetHelloID(utls.HelloChrome_Auto)
+		if osKey.IsMobile() {
+			return chrome.Mobile, osKey, true
+		}
+		return chrome.Desktop, osKey, true
 	case "firefox":
-		b.JA().SetHelloID(utls.HelloFirefox_Auto)
+		if osKey.IsMobile() {
+			return firefox.Mobile, osKey, true
+		}
+		return firefox.Desktop, osKey, true
 	}
-	if bow.proxyURL != "" {
-		b.Proxy(g.String(bow.proxyURL))
+	return profiles.Variant{}, osKey, false
+}
+
+// profileUserAgent returns the modern user agent matching the impersonated
+// browser family and OS, or an empty string when it is unknown.
+func profileUserAgent(browser string, osKey profiles.OSKey) string {
+	switch browser {
+	case "chrome":
+		return chrome.UserAgent.Get(osKey).UnwrapOrDefault().Std()
+	case "firefox":
+		return firefox.UserAgent.Get(osKey).UnwrapOrDefault().Std()
 	}
+	return ""
+}
+
+// reassertHeaders restores the browser's own headers after the impersonation
+// profile applied its defaults, so the configured User-Agent, Referer, cookies
+// and custom headers always win over the profile. Used as a low-priority
+// (late) request middleware when Impersonation.Headers is enabled.
+func (bow *Browser) reassertHeaders(req *esurf.Request) {
+	h := req.GetRequest().Header
+	if bow.userAgent != "" {
+		h.Set("User-Agent", bow.userAgent)
+	}
+	for key, values := range bow.headers {
+		if len(values) > 0 {
+			h[key] = append([]string(nil), values...)
+		}
+	}
+	if bow.lastReferer != "" {
+		h.Set("Referer", bow.lastReferer)
+	} else {
+		h.Del("Referer")
+	}
+	if bow.useCookie && bow.cookies != nil {
+		if cookies := bow.cookies.Cookies(req.GetRequest().URL); len(cookies) > 0 {
+			parts := make([]string, 0, len(cookies))
+			for _, c := range cookies {
+				parts = append(parts, c.Name+"="+c.Value)
+			}
+			h.Set("Cookie", strings.Join(parts, "; "))
+		} else {
+			h.Del("Cookie")
+		}
+	} else {
+		h.Del("Cookie")
+	}
+}
+
+// reconfigureHTTPClient rebuilds the underlying enetx/surf client from
+// scratch with the current impersonation, proxy, TLS and keep-alive settings,
+// and refreshes the *http.Client adapter used to send requests. A fresh
+// client is built every time: enetx/surf cannot apply the Impersonate
+// profile to a transport that has already served requests ("protocol https
+// already registered"), and a fresh transport also guarantees that a cleared
+// proxy leaves no stale dialer behind. Idle connections of the replaced
+// client are closed.
+func (bow *Browser) reconfigureHTTPClient() {
+	old := bow.surfClient
+	bow.surfClient = esurf.NewClient()
+	b := bow.surfClient.Builder()
+	variant, osKey, ok := bow.resolveImpersonation()
+	if ok {
+		if bow.impersonation.Headers {
+			// Full impersonation: TLS fingerprint, HTTP/2 and HTTP/3
+			// settings, header set and header ordering. The browser's own
+			// headers are re-asserted afterwards by a late middleware.
+			im := b.Impersonate()
+			switch osKey {
+			case profiles.MacOS:
+				im.MacOS()
+			case profiles.Linux:
+				im.Linux()
+			case profiles.Android:
+				im.Android()
+			case profiles.IOS:
+				im.IOS()
+			default:
+				im.Windows()
+			}
+			switch bow.impersonation.Browser {
+			case "chrome":
+				im.Chrome()
+			case "firefox":
+				im.Firefox()
+			}
+			b.With(func(req *esurf.Request) error {
+				bow.reassertHeaders(req)
+				return nil
+			}, 100)
+		} else {
+			// TLS-fingerprint-only mode: the profile headers are not applied,
+			// so the browser's own headers are sent untouched.
+			ja := b.JA()
+			if variant.ShuffleExtensions {
+				ja = ja.ShuffleExtensions()
+			}
+			if variant.HelloSpec != nil {
+				ja.SetHelloSpec(*variant.HelloSpec)
+			} else {
+				ja.SetHelloID(variant.HelloID)
+			}
+		}
+	}
+	// enetx/surf defaults to ProxyFromEnvironment and to skipping TLS
+	// certificate verification; the browser manages both explicitly.
+	b.Proxy(g.String(bow.proxyURL))
 	if bow.tlsConfig != nil {
 		b.TLSConfig(bow.tlsConfig)
+	} else {
+		b.SecureTLS()
 	}
 	if bow.disableKeepalive {
 		b.DisableKeepAlive()
@@ -708,6 +900,9 @@ func (bow *Browser) reconfigureHTTPClient() {
 		panic(fmt.Sprintf("surf: cannot configure HTTP client: %v", res.Err()))
 	}
 	bow.stdClient = bow.surfClient.Std()
+	if old != nil {
+		old.CloseIdleConnections()
+	}
 }
 
 // AddRequestHeader sets a header the browser sends with each request.
@@ -859,6 +1054,9 @@ func (bow *Browser) buildRequest(method, url string, ref *url.URL, body io.Reade
 	req.Header.Set("User-Agent", bow.userAgent)
 	if bow.attributes[SendReferer] && ref != nil {
 		req.Header.Set("Referer", ref.String())
+		bow.lastReferer = ref.String()
+	} else {
+		bow.lastReferer = ""
 	}
 
 	return req, nil

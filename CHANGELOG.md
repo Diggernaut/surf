@@ -1,3 +1,21 @@
+#### enetx-surf branch
+* Replaced the net/http transport with the [enetx/surf](https://github.com/enetx/surf)
+  HTTP client (Chrome/Firefox TLS fingerprints, HTTP/2/3, connection pooling)
+  using its Std() adapter. Headers, User-Agent, cookies, redirects, converters
+  and the DOM pipeline are unchanged.
+* Added browser impersonation settings: `SetImpersonation(Impersonation{Browser, OS, Headers, UserAgent})`
+  and `GetImpersonation()`. Supported browsers: chrome, firefox. Supported OS:
+  windows, macos, linux, android, ios, random (android/ios select the mobile
+  fingerprint variant). `Headers` also applies the profile header set and
+  ordering, `UserAgent` claims a user agent matching the fingerprint.
+* Added `SetProxy`/`ClearProxy` (schemeless URLs are treated as HTTP proxies),
+  `SetTLSConfig`, `DisableKeepAlives`, `CloseIdleConnections`. TLS certificates
+  are verified by default and no environment proxy is used, unless configured.
+* Removed `SetTransport`/`GetTransport` (the transport is owned by the
+  enetx/surf client now).
+* Added go.mod (the module was legacy, without one before).
+
+
 #### v0.5.5 - 2014/05/24
 * Added Browser.Head() method. [#24](https://github.com/headzoo/surf/pull/24)
 
