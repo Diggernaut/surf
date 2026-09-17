@@ -344,6 +344,10 @@ type Browser struct {
 	// use cookie flag
 	useCookie bool
 
+	// headers removed via DelRequestHeader: re-asserted after any request
+	// middleware (an impersonation profile can re-add its own defaults)
+	strippedHeaders map[string]bool
+
 	// reload counter
 	reloadCounter int
 	maxReloads    int
@@ -925,6 +929,14 @@ func (bow *Browser) reassertHeaders(req *esurf.Request) {
 	} else {
 		h.Del("Cookie")
 	}
+	// the browser's own header set is authoritative: anything the caller
+	// removed via DelRequestHeader stays off the wire even if a profile
+	// middleware re-added it earlier in the chain
+	for name := range bow.strippedHeaders {
+		if bow.headers.Get(name) == "" {
+			h.Del(name)
+		}
+	}
 }
 
 // reconfigureHTTPClient rebuilds the underlying enetx/surf client from
@@ -1008,6 +1020,11 @@ func (bow *Browser) reconfigureHTTPClient() {
 // AddRequestHeader sets a header the browser sends with each request.
 func (bow *Browser) AddRequestHeader(name, value string) {
 	bow.headers.Set(name, value)
+	if bow.strippedHeaders == nil {
+		bow.strippedHeaders = make(map[string]bool)
+	} else {
+		delete(bow.strippedHeaders, name)
+	}
 }
 
 // GetRequestHeader gets a header the browser sends with each request.
@@ -1027,6 +1044,10 @@ func (bow *Browser) GetAllRequestHeaders() string {
 // DelRequestHeader deletes a header so the browser will not send it with future requests.
 func (bow *Browser) DelRequestHeader(name string) {
 	bow.headers.Del(name)
+	if bow.strippedHeaders == nil {
+		bow.strippedHeaders = make(map[string]bool)
+	}
+	bow.strippedHeaders[name] = true
 }
 
 // ResolveUrl returns an absolute URL for a possibly relative URL.
