@@ -3,6 +3,7 @@ package browser
 import (
 	"bytes"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -1047,6 +1048,35 @@ func (bow *Browser) ResolveStringUrl(u string) (string, error) {
 func (bow *Browser) Download(o io.Writer) (int64, error) {
 	buff := bytes.NewBuffer(bow.body)
 	return io.Copy(o, buff)
+}
+
+// DownloadRaw fetches the given URL with the browser's own client (session
+// cookies, proxy, impersonated TLS fingerprint) and writes the raw response
+// body to the writer, bypassing the charset conversion pipeline that
+// corrupts binary content such as images. Does not touch the browser state
+// (the current page, history and bookmarks stay as they are).
+func (bow *Browser) DownloadRaw(u *url.URL, ref *url.URL, o io.Writer) (int64, error) {
+	req, err := bow.buildRequest("GET", u.String(), ref, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := bow.buildClient().Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return io.Copy(o, resp.Body)
+}
+
+// DownloadBase64 fetches the given URL like DownloadRaw and returns the raw
+// response body base64-encoded — a ready-to-send payload for captcha and
+// OCR services.
+func (bow *Browser) DownloadBase64(u *url.URL, ref *url.URL) (string, error) {
+	var buf bytes.Buffer
+	if _, err := bow.DownloadRaw(u, ref, &buf); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
 
 // Url returns the page URL as a string.
