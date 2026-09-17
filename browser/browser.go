@@ -909,7 +909,7 @@ func (bow *Browser) reassertHeaders(req *esurf.Request) {
 	}
 	if bow.lastReferer != "" {
 		h.Set("Referer", bow.lastReferer)
-	} else {
+	} else if bow.headers.Get("Referer") == "" {
 		h.Del("Referer")
 	}
 	if bow.useCookie && bow.cookies != nil {
