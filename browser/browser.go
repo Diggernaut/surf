@@ -1403,8 +1403,9 @@ func (bow *Browser) shouldRedirect(req *http.Request, via []*http.Request) error
 		}
 		return nil
 	}
-	return errors.NewLocation(
-		"Redirects are disabled. Cannot follow '%s'.", req.URL.String())
+	// ErrUseLastResponse hands the redirect response back to the caller
+	// unchanged, so redirect chains can be followed manually hop by hop
+	return http.ErrUseLastResponse
 }
 
 // attributeToUrl reads an attribute from an element and returns a url.
